@@ -44,7 +44,6 @@ library(corrplot)
 library(reshape2)
 library(ComplexHeatmap)
 library(circlize)
-library(UpSetR)
 trop = RSkittleBrewer('tropical')
 ```
 
