@@ -1,0 +1,251 @@
+---
+title: "Differential expression analysis of individual Drosophila melanogaster (w1118) male and female flies fed with different concentrations of dimethyl sulfoxide (DMSO) over different time periods."
+author: "Analysis done by Yuejun Wang, TriLab Biounformatic Group"
+output:
+  html_document:
+  pdf_document: default
+  df_print: paged
+gemoetry: margin=1in
+fontsize: 8pt
+fontfamily: mathpazo
+---
+
+\center
+
+# *Summary:*
+To gain an understanding of the toxic effect of a commonly used solvent, flies were exposed to 0, 0.5, 2, 3.5, or 7% v/v DMSO for 2, 4, 8, 24 or 48 h. We performed compound exposure of 800 individual flies in 4 Whole Animal Feeding Flats (WAFFL), a novel 96 well system to house, feed, and harvest individual flies. This expression profiling was part of a set of the experiments performed to evaluate the suitability of the WAFFL for high throughput small compound screening in D. melanogaster. Treated flies and controls were used for poly A+ stranded mRNA library preparation and we performed high throughput RNA sequencing to determine the transcriptional changes due to DMSO treatment.
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, tidy = TRUE)
+```
+
+# Load libraries
+```{r message=FALSE}
+
+options(java.parameters = "-Xmx8000m")
+
+library(tidyverse)
+library(DESeq2)
+library(cowplot)
+library(ggpubr)
+library(RColorBrewer)
+library(pheatmap)
+library(ggsci)
+library(AnnotationDbi)
+library(scales)
+library(org.Dm.eg.db)
+library(xlsx)
+library(r2excel)
+library(ggplot2)
+library(viridis)
+library(RSkittleBrewer)
+library(genefilter)
+library(corrplot)
+library(reshape2)
+library(ComplexHeatmap)
+library(circlize)
+library(UpSetR)
+trop = RSkittleBrewer('tropical')
+```
+
+# Load aux functions
+```{r}
+source(file = "../01_aux_rnaseq_functions.R")
+```
+
+# Load data
+```{r}
+metadata <- as.data.frame(read_tsv(file = "../SampleInfo.txt", col_names = TRUE, comment = "#"))
+rownames(metadata) <- metadata$SampleName
+
+
+read_counts <- as.data.frame(read_tsv(file = "/gpfs/gsfs12/users/wangy80/TK74/results/05counts/read_counts", col_names = TRUE, comment = "#"))
+rownames(read_counts) <- read_counts$Geneid # adding gene ids as row names
+
+
+# Rename sample names
+read_counts <- read_counts[,7:length(read_counts)]
+
+colnames(read_counts) <- gsub(".sorted.dedup.bam","",
+                              gsub("results/04dedup/","",
+                                   colnames(read_counts)))
+
+
+# Sort tables so metadata and read counts match order
+read_counts <- read_counts[,match(metadata$SampleName, colnames(read_counts))]
+all(rownames(metadata) == colnames(read_counts))
+
+
+# Round read counts to the closest interger
+read_counts <- round(read_counts, digits = 0)
+
+# include total read counts in metadata
+metadata$read_counts <- colSums(read_counts)
+
+# Rename column names in read_counts based on metadata
+colnames(read_counts) <- rownames(metadata)
+
+write.table(x = metadata, file = "metadata.txt", sep = "\t") 
+```
+
+# DE analysis with DESeq2
+
+```{r}
+dir.create(path = "./Plots", showWarnings = FALSE)
+
+# Converting Time, DMSO and Replicate number to factors
+metadata$Time <- factor(metadata$Time,levels=c("2hr","4hr","8hr","24hr","48hr"))
+metadata$DMSO <- as.factor(metadata$DMSO)
+metadata$Replicate <- as.factor(metadata$Replicate)
+metadata$Sex <- as.factor(metadata$Sex)
+
+# Adding read_depth in design to control for read_depth
+dds <- DESeqDataSetFromMatrix(countData = read_counts, 
+                              colData = metadata,  
+                              design = ~ Sex + Time + DMSO)
+
+```
+
+
+# Normalize counts
+
+```{r}
+vsd <- vst(dds, blind=FALSE)
+
+# Keep genes with at least 100 reads total across samples
+keep <- rowSums(as.data.frame(dds@assays@data@listData)) >= 20
+vsd <- vsd[keep,]
+df <- as.data.frame(assay(vsd))
+write.table(df,"DESeq2_normalized.txt",sep="\t",quote=F)
+
+## rename samples that are missed labeled
+
+colnames(df)[6] <- "F_0_8hr_rep2"
+colnames(df)[10] <- "M_0_8hr_rep2"
+```
+
+```{r}
+# Calculate distances between samples
+sampleDists <- dist(t(df))
+
+# Plot inter-sample distances
+sampleDistMatrix <- as.matrix(sampleDists)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+p.hm <- pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         color = colorRampPalette(c("red", "white", "blue"))(100))
+
+pdf("./Plots/heat_map.pdf", p.hm,width=16,height=16)
+p.hm
+dev.off()
+```
+# remove sample outlier M_0_24hr_rep1
+
+```{r}
+df$gene <- rownames(df)
+df.m <- melt(df)
+df.m$sample <- gsub("_rep[1,2,3]","",df.m$variable)
+df.m <- df.m[which(df.m$variable!="M_0_24hr_rep1"),]
+
+df.t <- as.data.frame(t(df[,1:(ncol(df)-1)]))
+df.t$sample <- gsub("_rep[1,2,3]","",rownames(df.t))
+df.t <- df.t[which(df.t$sample!="M_0_24hr_rep1"),]
+
+```
+
+
+```{r}
+## pairwise comparison
+# results <- df.m %>%
+#   mutate(condition = factor(sample)) %>%
+#   group_by(gene) %>%
+#   filter(length(unique(condition)) >= 2) %>%
+#   nest() %>%
+#   mutate(
+#     model = map(data, ~ TukeyHSD(aov(value ~ condition, data = .x))),
+#     coef = map(model, ~ broom::tidy(.x))
+#   ) %>%
+#   unnest(coef) 
+# 
+# res.df <- as.data.frame(results)
+# 
+# write.table(res.df[,c(1,5:10)],"pairwise_comparison.txt",quote=F,sep="\t",row.names=F)
+
+#%>% 
+#  select(-term)
+```
+
+
+
+# wilcox.test for specific group to all the other samples
+```{r}
+groups <- unique(df.m$sample)
+
+## remove samples with only one replicate
+groups <- groups[-which(groups %in% c('F_3.5_24hr','M_3.5_48hr'))]
+
+df_list <- list()
+
+for(i in 1:length(groups)){
+  res <- df.m %>%
+    group_by(gene) %>%
+    summarise(across(value, ~ wilcox.test(.[sample == groups[i]], .[sample != groups[i]])$p.value, .names="pvalue"),
+              across(value, ~ mean(.[sample == groups[i]]),.names=groups[i]),
+              across(value, ~ mean(.[sample != groups[i]]),.names=paste0("not_",groups[i]))
+              ) %>%
+    as.data.frame
+  res$diff <- res[,3]-res[,4]
+  res$p.adjust <- p.adjust(res$pvalue,method="fdr")
+  
+  colnames(res)[5] <- paste0(groups[i],".diff")
+  colnames(res)[6] <- paste0(groups[i],".fdr")
+  
+  assign(groups[i],res)
+  id <- groups[i]
+  df_list[[id]] <- res[,c(1,5,6)]
+}
+```
+
+```{r}
+# Join multiple data.frames
+# merge all data frames in list
+out <- df_list %>% purrr::reduce(full_join, by='gene')
+
+write.table(out,"comparison_wilcoxtest.txt",quote=F,sep="\t",row.names=F)
+```
+
+
+# heatmap
+
+```{r message=FALSE}
+# rename column names
+colnames <- c("gene","diff","fdr") 
+df_list2 <- lapply(df_list, setNames, colnames)
+
+merged_df <- bind_rows(df_list2, .id = "comparisons")
+
+df_wide <- pivot_wider(merged_df[,c(1,2,3)],  names_from = "comparisons", values_from = "diff")
+mat <- as.data.frame(df_wide[,2:ncol(df_wide)])
+rownames(mat) <- df_wide$gene
+
+mat[is.na(mat)] <- 0
+
+p <- Heatmap(mat, 
+      name="diff",
+      show_row_names = FALSE,
+      col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+      #column_names_gp = gpar(fontsize =8),
+      #heatmap_height = unit(12, "cm"), 
+      #heatmap_width = unit(12, "cm")
+      )
+
+pdf(paste0("./Plots/pheatmap_","diff",".pdf"),p,height=12,width=12)
+plot(p)
+dev.off()
+
+```
+
+```{r}
+sessionInfo()
+```
